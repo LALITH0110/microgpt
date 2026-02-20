@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>microgpt</title>
+    <style>
+        :root {
+            --font-size: 8.5px;
+            --line-height: 1.5;
+            --columns: 2;
+            --col-gap: 32px;
+            --bg: #0a0a0a;
+            --fg: #c9d1d9;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: radial-gradient(ellipse at 50% 40%, #0f1318 0%, var(--bg) 100%);
+            color: var(--fg);
+            font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+            padding: 40px 10px;
+        }
+        .poster { margin: 0 auto; }
+        .header {
+            text-align: center;
+            margin-bottom: 32px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid #1b2028;
+        }
+        .header h1 {
+            font-size: 30px;
+            font-weight: 300;
+            letter-spacing: 10px;
+            text-transform: lowercase;
+            color: #e6edf3;
+            margin-bottom: 8px;
+        }
+        .header .sub {
+            font-size: 11px;
+            color: #6e7681;
+            font-weight: 300;
+            font-style: italic;
+        }
+        .columns {
+            column-count: var(--columns);
+            column-gap: var(--col-gap);
+            column-rule: 1px solid #161b22;
+            font-size: var(--font-size);
+            line-height: var(--line-height);
+            column-fill: auto;
+            height: 720px;
+        }
+        .line {
+            white-space: pre;
+            overflow-wrap: break-word;
+            break-inside: avoid;
+            padding: 0 2px;
+        }
+        .ln {
+            display: inline-block;
+            width: 22px;
+            text-align: right;
+            color: #3d444d;
+            user-select: none;
+            margin-right: 14px;
+            font-size: inherit;
+        }
+        .kw  { color: #ff7b72; }
+        .str { color: #a5d6ff; }
+        .num { color: #79c0ff; }
+        .cmt { color: #6e7681; font-style: italic; }
+        .fn  { color: #d2a8ff; }
+        .bi  { color: #ffa657; }
+        .op  { color: #ff7b72; }
+        .footer {
+            text-align: center;
+            margin-top: 32px;
+            padding-top: 20px;
+            border-top: 1px solid #1b2028;
+            color: #30363d;
+            font-size: 11px;
+            letter-spacing: 4px;
+            font-weight: 300;
+        }
+        @media print {
+            body { background: #0a0a0a; padding: 20px 5px; }
+            .columns { height: auto; }
+        }
+    </style>
+</head>
+<body>
+    <div class="poster">
+        <div class="header">
+            <h1>microgpt</h1>
+            <p class="sub">The most atomic way to train and inference a GPT in pure, dependency-free Python. This file is the complete algorithm. Everything else is just efficiency.</p>
+        </div>
+        <div class="columns" id="code"></div>
+        <div class="footer">@lalith</div>
+    </div>
+
+    <script id="src" type="text/plain">
+import os, math, random
+random.seed(42)
+if not os.path.exists('input.txt'):
+    import urllib.request
+    urllib.request.urlretrieve('https://raw.githubusercontent.com/karpathy/makemore/988aa59/names.txt', 'input.txt')
+docs = [l.strip() for l in open('input.txt') if l.strip()]
+random.shuffle(docs)
+uchars = sorted(set(''.join(docs))); BOS = len(uchars); vocab_size = BOS + 1
+print(f"num docs: {len(docs)}"); print(f"vocab size: {vocab_size}")
+
+class Value:
+    __slots__ = ('data', 'grad', '_children', '_local_grads')
+    def __init__(self, data, children=(), local_grads=()):
+        self.data = data; self.grad = 0; self._children = children; self._local_grads = local_grads
+    def __add__(self, other):
+        other = other if isinstance(other, Value) else Value(other); return Value(self.data + other.data, (self, other), (1, 1))
+    def __mul__(self, other):
+        other = other if isinstance(other, Value) else Value(other); return Value(self.data * other.data, (self, other), (other.data, self.data))
+    def __pow__(self, other): return Value(self.data**other, (self,), (other * self.data**(other-1),))
+    def log(self): return Value(math.log(self.data), (self,), (1/self.data,))
+    def exp(self): return Value(math.exp(self.data), (self,), (math.exp(self.data),))
+    def relu(self): return Value(max(0, self.data), (self,), (float(self.data > 0),))
+    def __neg__(self): return self * -1
+    def __radd__(self, other): return self + other
+    def __sub__(self, other): return self + (-other)
+    def __rsub__(self, other): return other + (-self)
+    def __rmul__(self, other): return self * other
+    def __truediv__(self, other): return self * other**-1
+    def __rtruediv__(self, other): return other * self**-1
+    def backward(self):
+        topo, visited = [], set()
+        def build(n):
+            if n not in visited: visited.add(n); [build(c) for c in n._children]; topo.append(n)
+        build(self); self.grad = 1
+        for n in reversed(topo):
+            for child, lg in zip(n._children, n._local_grads): child.grad += lg * n.grad
+
+n_layer, n_embd, block_size, n_head = 1, 16, 16, 4
+head_dim = n_embd // n_head
+mat = lambda r, c, s=0.08: [[Value(random.gauss(0, s)) for _ in range(c)] for _ in range(r)]
+sd = {'wte': mat(vocab_size, n_embd), 'wpe': mat(block_size, n_embd), 'lm_head': mat(vocab_size, n_embd)}
+for i in range(n_layer):
+    sd |= {f'layer{i}.attn_wq': mat(n_embd, n_embd), f'layer{i}.attn_wk': mat(n_embd, n_embd),
+           f'layer{i}.attn_wv': mat(n_embd, n_embd), f'layer{i}.attn_wo': mat(n_embd, n_embd),
+           f'layer{i}.mlp_fc1': mat(4*n_embd, n_embd), f'layer{i}.mlp_fc2': mat(n_embd, 4*n_embd)}
+params = [p for weights in sd.values() for row in weights for p in row]
+print(f"num params: {len(params)}")
+
+linear = lambda x, w: [sum(wi*xi for wi,xi in zip(wo,x)) for wo in w]
+def softmax(logits):
+    mx = max(v.data for v in logits); exps = [(v-mx).exp() for v in logits]; s = sum(exps)
+    return [e/s for e in exps]
+rmsnorm = lambda x: [xi*(sum(xi*xi for xi in x)/len(x)+1e-5)**-0.5 for xi in x]
+
+def gpt(tid, pos, keys, vals):
+    x = rmsnorm([t+p for t,p in zip(sd['wte'][tid], sd['wpe'][pos])])
+    for li in range(n_layer):
+        xr = x; x = rmsnorm(x)
+        q, k, v = (linear(x, sd[f'layer{li}.attn_w{c}']) for c in 'qkv')
+        keys[li].append(k); vals[li].append(v); x_attn = []
+        for h in range(n_head):
+            hs = h*head_dim
+            qh = q[hs:hs+head_dim]; kh = [ki[hs:hs+head_dim] for ki in keys[li]]; vh = [vi[hs:hs+head_dim] for vi in vals[li]]
+            aw = softmax([sum(qh[j]*kh[t][j] for j in range(head_dim))/head_dim**0.5 for t in range(len(kh))])
+            x_attn.extend([sum(aw[t]*vh[t][j] for t in range(len(vh))) for j in range(head_dim)])
+        x = [a+b for a,b in zip(linear(x_attn, sd[f'layer{li}.attn_wo']), xr)]; xr = x; x = rmsnorm(x)
+        x = [xi.relu() for xi in linear(x, sd[f'layer{li}.mlp_fc1'])]
+        x = [a+b for a,b in zip(linear(x, sd[f'layer{li}.mlp_fc2']), xr)]
+    return linear(x, sd['lm_head'])
+
+b1, b2, eps, lr = 0.85, 0.99, 1e-8, 0.01
+m, v = [0.0]*len(params), [0.0]*len(params)
+for step in range(1000):
+    doc = docs[step % len(docs)]
+    tokens = [BOS]+[uchars.index(c) for c in doc]+[BOS]; n = min(block_size, len(tokens)-1)
+    keys, vals = [[] for _ in range(n_layer)], [[] for _ in range(n_layer)]
+    losses = [-softmax(gpt(tokens[pos], pos, keys, vals))[tokens[pos+1]].log() for pos in range(n)]
+    loss = sum(losses)/n; loss.backward()
+    lrt = lr*(1-step/1000)
+    for i, p in enumerate(params):
+        m[i] = b1*m[i]+(1-b1)*p.grad; v[i] = b2*v[i]+(1-b2)*p.grad**2
+        p.data -= lrt*(m[i]/(1-b1**(step+1)))/((v[i]/(1-b2**(step+1)))**0.5+eps); p.grad = 0
+    print(f"step {step+1:4d} / 1000 | loss {loss.data:.4f}", end='\r')
+
+print("\n--- inference (new, hallucinated names) ---")
+for si in range(20):
+    keys, vals = [[] for _ in range(n_layer)], [[] for _ in range(n_layer)]
+    tid, sample = BOS, []
+    for pos in range(block_size):
+        probs = softmax([l/0.5 for l in gpt(tid, pos, keys, vals)])
+        tid = random.choices(range(vocab_size), weights=[p.data for p in probs])[0]
+        if tid == BOS: break
+        sample.append(uchars[tid])
+    print(f"sample {si+1:2d}: {''.join(sample)}")
+</script>
+
+    <script>
+    (function() {
+        var src = document.getElementById('src').textContent;
+        src = src.replace(/^\n/, '').replace(/\n$/, '');
+        var lines = src.split('\n');
+        var container = document.getElementById('code');
+
+        var KW = new Set([
+            'and','as','assert','async','await','break','class','continue',
+            'def','del','elif','else','except','finally','for','from',
+            'global','if','import','in','is','lambda','nonlocal','not',
+            'or','pass','raise','return','try','while','with','yield',
+            'True','False','None'
+        ]);
+        var BI = new Set([
+            'print','len','range','sum','max','min','set','list','dict',
+            'int','float','str','bool','type','isinstance','enumerate',
+            'zip','map','filter','sorted','reversed','open','abs','round',
+            'super','object','ValueError','TypeError','KeyError'
+        ]);
+
+        function esc(s) {
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        function highlight(line) {
+            var r = '', i = 0;
+            while (i < line.length) {
+                // Comments
+                if (line[i] === '#') {
+                    r += '<span class="cmt">' + esc(line.slice(i)) + '</span>';
+                    break;
+                }
+                // Strings: f-strings, regular strings
+                if ((line[i] === 'f' || line[i] === 'r' || line[i] === 'b') && i+1 < line.length && (line[i+1] === '"' || line[i+1] === "'")) {
+                    var prefix = line[i];
+                    i++;
+                    var q = line[i]; i++;
+                    var triple = false;
+                    if (i+1 < line.length && line[i] === q && line[i+1] === q) { triple = true; i += 2; }
+                    var s = prefix + q + (triple ? q+q : '');
+                    var end = triple ? q+q+q : q;
+                    var ei = line.indexOf(end, i);
+                    if (ei === -1) { s += esc(line.slice(i)); i = line.length; }
+                    else { s += esc(line.slice(i, ei+end.length)); i = ei + end.length; }
+                    r += '<span class="str">' + s + '</span>';
+                    continue;
+                }
+                if (line[i] === '"' || line[i] === "'") {
+                    var q = line[i]; i++;
+                    var triple = false;
+                    if (i+1 < line.length && line[i] === q && line[i+1] === q) { triple = true; i += 2; }
+                    var s = q + (triple ? q+q : '');
+                    var end = triple ? q+q+q : q;
+                    var ei = line.indexOf(end, i);
+                    if (ei === -1) { s += esc(line.slice(i)); i = line.length; }
+                    else { s += esc(line.slice(i, ei+end.length)); i = ei + end.length; }
+                    r += '<span class="str">' + s + '</span>';
+                    continue;
+                }
+                // Numbers
+                if (/[0-9]/.test(line[i]) && (i === 0 || !/[a-zA-Z_]/.test(line[i-1]))) {
+                    var j = i;
+                    while (j < line.length && /[0-9.eE\-+x]/.test(line[j])) j++;
+                    r += '<span class="num">' + esc(line.slice(i, j)) + '</span>';
+                    i = j;
+                    continue;
+                }
+                // Identifiers
+                if (/[a-zA-Z_]/.test(line[i])) {
+                    var j = i;
+                    while (j < line.length && /[a-zA-Z0-9_]/.test(line[j])) j++;
+                    var word = line.slice(i, j);
+                    if (KW.has(word)) {
+                        r += '<span class="kw">' + esc(word) + '</span>';
+                    } else if (BI.has(word)) {
+                        r += '<span class="bi">' + esc(word) + '</span>';
+                    } else if (j < line.length && line[j] === '(') {
+                        r += '<span class="fn">' + esc(word) + '</span>';
+                    } else {
+                        r += esc(word);
+                    }
+                    i = j;
+                    continue;
+                }
+                // Operators
+                if ('+-*/%=<>!&|^~@'.indexOf(line[i]) !== -1) {
+                    r += '<span class="op">' + esc(line[i]) + '</span>';
+                    i++;
+                    continue;
+                }
+                r += esc(line[i]);
+                i++;
+            }
+            return r;
+        }
+
+        lines.forEach(function(line, idx) {
+            var div = document.createElement('div');
+            div.className = 'line';
+            var num = String(idx + 1);
+            while (num.length < 3) num = ' ' + num;
+            div.innerHTML = '<span class="ln">' + num + '</span>' + highlight(line);
+            container.appendChild(div);
+        });
+    })();
+    </script>
+</body>
+</html>
